@@ -122,16 +122,16 @@ class Individual:
         self.roles = ["普通人"]
 
         # —— 作息时刻表（围绕均值扰动）——
-        # phase 0.00 ~ 1.00
-        self.wake_up  = 0.05 + random.gauss(0, 0.012)   # 起得更早
-        self.leave    = 0.15 + random.gauss(0, 0.020)   # 出门更早
-        self.return_t = 0.62 + random.gauss(0, 0.030)   # 回家略晚
-        self.to_bed   = 0.88 + random.gauss(0, 0.020)   # 上床更晚
+        # phase 0.00 ~ 1.00；整体后移，允许晚归
+        self.wake_up  = 0.08 + random.gauss(0, 0.015)
+        self.leave    = 0.20 + random.gauss(0, 0.025)
+        self.return_t = 0.75 + random.gauss(0, 0.050)   # 回家更晚
+        self.to_bed   = 0.97 + random.gauss(0, 0.015)   # 上床非常晚
         # 约束顺序
-        self.wake_up  = min(max(self.wake_up,  0.01), 0.15)
-        self.leave    = min(max(self.leave,    self.wake_up + 0.02), 0.30)
-        self.return_t = min(max(self.return_t, 0.55), 0.80)
-        self.to_bed   = min(max(self.to_bed,   self.return_t + 0.05), 0.98)
+        self.wake_up  = min(max(self.wake_up,  0.01), 0.20)
+        self.leave    = min(max(self.leave,    self.wake_up + 0.03), 0.35)
+        self.return_t = min(max(self.return_t, self.leave + 0.20), 0.85)
+        self.to_bed   = min(max(self.to_bed,   self.return_t + 0.05), 0.99)
 
         # 每个阶段的持续时长（phase 单位）
         self.t_outgoing  = 0.12 + random.gauss(0, 0.015)
@@ -174,7 +174,8 @@ class Individual:
         return False
 
     # ---------- 移动一帧 ----------
-    def step_move(self, dt, phase, plaza):
+    # day_len: 每天多少"真实秒"；用于按剩余时间计算归寝时的加速速度
+    def step_move(self, dt, phase, plaza, day_len=20.0):
         act = self.current_activity(phase)
 
         # —— 当阶段变化时，清除旧目标 ——
@@ -182,10 +183,13 @@ class Individual:
             self.target = None
             self._prev_act = act
 
-        if act == ACT_ASLEEP or act == ACT_BED:
-            # 回到床位，完全不动
-            self.x, self.y = self.bed_x, self.bed_y
-            self.target = None
+        if act == ACT_ASLEEP:
+            # 已经在床上，小幅抖动即可（不再瞬移）
+            target = (self.bed_x, self.bed_y)
+            dist = math.hypot(self.x - target[0], self.y - target[1])
+            if dist > 2.0:
+                self._move_toward_pt(target, dt, self.speed * 0.3)
+            self._clamp_to_dorm()
             return
 
         if act == ACT_WAKING:
@@ -199,7 +203,6 @@ class Individual:
         if act == ACT_OUTGOING:
             # 出门路上：朝广场/室外走（没到达就持续走）
             if self.target is None or self._dist_to_target() < 10:
-                # 以广场中央偏一点的位置
                 self.target = plaza.random_inside(margin=50)
             self._move_toward(dt, self.speed)
             self._clamp_world()
@@ -228,21 +231,50 @@ class Individual:
             return
 
         if act == ACT_RETURNING:
-            # 回家：朝宿舍方向走
-            if self.target is None or self._dist_to_target() < 10:
-                self.target = (self.bed_x, self.bed_y)
-            self._move_toward(dt, self.speed)
-            # 不限制在寝室内（他们可能还没到）
+            # 回家：朝床位持续移动（不瞬移）
+            target = (self.bed_x, self.bed_y)
+            self._move_toward_pt(target, dt, self.speed)
             self._clamp_world()
             return
 
         if act == ACT_EVENING:
-            # 已归寝，在寝室内小幅活动
-            if self.target is None or self._dist_to_target() < 4:
-                self.target = self.dorm.random_inside(margin=12)
-            self._move_toward(dt, self.speed * 0.7)
+            # 晚归：朝床位物理移动，根据"距离 / 剩余时间"动态加速，
+            # 保证在上床时刻前到达床位，不瞬移。
+            target = (self.bed_x, self.bed_y)
+            dist = math.hypot(self.x - target[0], self.y - target[1])
+            remaining_phase = max(0.002, self.to_bed - phase)
+            remaining_sec = remaining_phase * day_len
+            # 所需速度 = 距离 / 剩余时间；1.3 倍安全系数
+            needed_speed = (dist / remaining_sec) * 1.3
+            speed = max(self.speed, needed_speed)
+            # 限速避免极端瞬移感
+            speed = min(speed, self.speed * 12.0)
+            self._move_toward_pt(target, dt, speed)
             self._clamp_to_dorm()
             return
+
+        if act == ACT_BED:
+            # 上床：仅做小幅靠拢（仍不瞬移），之后基本静止
+            target = (self.bed_x, self.bed_y)
+            dist = math.hypot(self.x - target[0], self.y - target[1])
+            if dist > 1.5:
+                self._move_toward_pt(target, dt, self.speed * 0.4)
+            self._clamp_to_dorm()
+            return
+
+    # ---------- 朝指定坐标移动（不使用 self.target）----------
+    def _move_toward_pt(self, target, dt, v):
+        dx = target[0] - self.x
+        dy = target[1] - self.y
+        d = math.hypot(dx, dy)
+        if d < 1e-3:
+            return
+        step = v * dt
+        if step >= d:
+            self.x, self.y = target[0], target[1]
+        else:
+            self.x += dx / d * step
+            self.y += dy / d * step
 
     # ---------- 是否已经在室外区域（plaza 或走廊） ----------
     def _is_outside(self, plaza):
@@ -484,17 +516,15 @@ class Simulation:
 
         # 每人移动（以秒为单位的 dt：phase*day_len/speed）
         dt_sec = dphase * self.day_len_var.get() / max(0.01, self.speed_var.get())
+        day_len = max(0.1, self.day_len_var.get())
         for p in self.people:
-            p.step_move(dt_sec, self.phase, self.plaza)
+            p.step_move(dt_sec, self.phase, self.plaza, day_len)
 
-        # 离散接触判定（白天/傍晚有效阶段）
-        activity_phase = (self.phase < self._any_return_threshold() or
-                          self.phase < 0.78)  # 仅在大家还活动时判定
+        # 离散接触判定（白天/傍晚有效阶段；时刻表后移，窗口也后移）
+        cur_act_phase = (self.phase % 1.0)
+        activity_phase = 0.12 < cur_act_phase < 0.92
         while self.next_contact_phase < self.phase and activity_phase:
-            # 只在"有活动"的阶段做接触判定
-            cur_act_phase = (self.phase % 1.0)
-            if 0.10 < cur_act_phase < 0.82:
-                self._do_contacts()
+            self._do_contacts()
             self.next_contact_phase += 1.0 / self.contacts_per_day
 
         # 跨零点 → 每日状态更新
@@ -502,12 +532,6 @@ class Simulation:
             self.phase -= 1.0
             self.next_contact_phase = 1.0 / self.contacts_per_day
             self._daily_update()
-
-    def _any_return_threshold(self):
-        # 简单阈值：所有人"上床"之后不做接触
-        if not self.people:
-            return 0.8
-        return 0.82
 
     # ---------- 接触感染 ----------
     def _do_contacts(self):
@@ -641,10 +665,10 @@ class Simulation:
                           fill="#e0b080", font=("", 9))
 
         # 夜色遮罩（睡觉时加深）
-        if self.phase < 0.10 or self.phase > 0.82:
+        if self.phase < 0.10 or self.phase > 0.93:
             c.create_rectangle(0, 0, self.world_w, self.world_h,
                                fill="#1a1a3a", stipple="gray25")
-        elif self.phase > 0.70:
+        elif self.phase > 0.82:
             c.create_rectangle(0, 0, self.world_w, self.world_h,
                                fill="#1a1a3a", stipple="gray50")
 
@@ -675,7 +699,7 @@ class Simulation:
                             fill="#f0b040", outline="")
         # 阶段分隔
         for (label, ph) in [("睡", 0.0), ("起床", 0.10), ("出门", 0.22),
-                            ("回家", 0.58), ("上床", 0.78), ("次日", 1.0)]:
+                            ("回家", 0.75), ("上床", 0.97), ("次日", 1.0)]:
             x = 20 + w * ph
             c.create_line(x, bar_y - 2, x, bar_y + 12, fill="#888")
             c.create_text(x, bar_y + 16, text=label, fill="#bbb",
@@ -764,10 +788,10 @@ class Simulation:
             return "深夜/睡眠"
         if ph < 0.22:
             return "早晨起床"
-        if ph < 0.58:
-            return "白天外出"
         if ph < 0.78:
-            return "傍晚归寝"
+            return "白天外出"
+        if ph < 0.93:
+            return "晚归途中"
         return "夜间睡眠"
 
 

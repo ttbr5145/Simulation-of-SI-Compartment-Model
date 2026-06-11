@@ -419,25 +419,24 @@ class Simulation {
   }
 
   /* dt 单位："秒"。每天长度 = this.dayLen 秒
-     dayPhase：0.0 早晨 · 0.5 傍晚（归寝开始）· 0.75 午夜（状态更新）· 1.0 次日早晨
-     采用离散接触判定：每隔 1/contactsPerDay 的 phase 做一次 O(n^2) 距离判定，
-     每次距离足够近则以概率 beta 发生传染。同一对人在同一判定点只判定一次。 */
+     dayPhase：0.0 早晨 · 0.78 傍晚（开始晚归）· 0.97 上床（慢速靠拢）· 1.0 次日早晨
+     晚归阶段按"距离 / 剩余时间"动态加速，保证上床前物理到达床位，不瞬移。 */
   step(dt){
     this.dayPhase += dt / this.dayLen;
     let phaseText = "";
     let canContact = false;
 
-    if (this.dayPhase < 0.5){
+    if (this.dayPhase < 0.78){
       phaseText = "白天 (活动·接触)";
       this.moveDay(dt);
       canContact = true;
-    } else if (this.dayPhase < 0.75){
-      phaseText = "夜间前半 (归寝·仍可接触)";
-      this.moveNightEarly(dt);
+    } else if (this.dayPhase < 0.97){
+      phaseText = "晚归途中 (加速回寝·可接触)";
+      this.moveReturning(dt);
       canContact = true;
     } else {
-      phaseText = "午夜 (休息)";
-      this.moveNightLate(dt);
+      phaseText = "夜间睡眠 (卧床)";
+      this.moveSleeping(dt);
     }
 
     // 离散接触判定：跨越检查点时执行一次
@@ -459,44 +458,42 @@ class Simulation {
 
   /* ---------- 运动 ---------- */
   moveDay(dt){
-    const spd = 30; // 基础速度 px/s (未乘dt，在下面乘)
+    const spd = 30;
     for (const p of this.individuals){
       if (p.isDead) continue;
-      // 随机扰动速度
       p.vx += (Math.random()-0.5) * 2 * 60 * dt;
       p.vy += (Math.random()-0.5) * 2 * 60 * dt;
-      // 阻尼
       p.vx *= 0.92; p.vy *= 0.92;
-      // 限幅
       const maxV = 70;
       const v = Math.hypot(p.vx,p.vy);
       if (v>maxV){ p.vx = p.vx/v*maxV; p.vy = p.vy/v*maxV; }
-      // 移动
       p.x += p.vx * dt; p.y += p.vy * dt;
-      // 边界反弹
       if (p.x<6){p.x=6; p.vx=Math.abs(p.vx);}
       if (p.x>this.W-6){p.x=this.W-6; p.vx=-Math.abs(p.vx);}
       if (p.y<6){p.y=6; p.vy=Math.abs(p.vy);}
       if (p.y>this.H-6){p.y=this.H-6; p.vy=-Math.abs(p.vy);}
     }
   }
-  moveNightEarly(dt){
-    // 朝 homePos 移动 + 小幅抖动
+  // 晚归：朝床位物理移动，按"距离 / 剩余时间"动态加速
+  moveReturning(dt){
+    const baseSpeed = 180;          // 基础像素/秒
     for (const p of this.individuals){
       if (p.isDead) continue;
       const target = p.homePos;
-      // 如果没有归属寝室（未来流浪者），就在原地游荡
-      if (!target) { this.wander(p,dt,15); continue; }
+      if (!target){ this.wander(p,dt,15); continue; }
       const dx = target.x - p.x, dy = target.y - p.y;
       const dist = Math.hypot(dx,dy);
-      if (dist > 2){
-        const k = 40 / Math.max(2,dist);
-        p.x += dx*k*dt; p.y += dy*k*dt;
-      } else {
-        p.x += (Math.random()-0.5)*15*dt;
-        p.y += (Math.random()-0.5)*15*dt;
+      // 离上床还剩多少秒
+      const remainingPhase = Math.max(0.002, 0.97 - this.dayPhase);
+      const remainingSec  = remainingPhase * this.dayLen;
+      const neededSpeed   = (dist / remainingSec) * 1.3;
+      const speed         = Math.min(Math.max(baseSpeed, neededSpeed), baseSpeed * 12);
+      if (dist > 1.0){
+        const step = Math.min(dist, speed * dt);
+        p.x += dx / dist * step;
+        p.y += dy / dist * step;
       }
-      // 限制在所属寝室内 + 小边界
+      // 限制在所属寝室范围 + 小边界（归寝后应该进入宿舍）
       if (p.dormitory){
         const d = p.dormitory;
         if (p.x<d.x+4)p.x=d.x+4; if (p.x>d.x+d.w-4)p.x=d.x+d.w-4;
@@ -504,12 +501,20 @@ class Simulation {
       }
     }
   }
-  moveNightLate(dt){
-    // 基本静止，仅细微抖动
+  // 上床/睡觉：仅小幅靠拢，不再瞬移
+  moveSleeping(dt){
     for (const p of this.individuals){
       if (p.isDead) continue;
-      p.x += (Math.random()-0.5)*4*dt;
-      p.y += (Math.random()-0.5)*4*dt;
+      const target = p.homePos;
+      if (target){
+        const dx = target.x - p.x, dy = target.y - p.y;
+        const dist = Math.hypot(dx,dy);
+        if (dist > 2.0){
+          const step = Math.min(dist, 40 * dt);
+          p.x += dx / dist * step;
+          p.y += dy / dist * step;
+        }
+      }
       if (p.dormitory){
         const d = p.dormitory;
         if (p.x<d.x+4)p.x=d.x+4; if (p.x>d.x+d.w-4)p.x=d.x+d.w-4;
@@ -665,9 +670,12 @@ class Simulation {
     if (this.plaza) this.plaza.draw(ctx);
     // 医院/隔离区等未来可在这里 draw
 
-    // 白天/夜晚氛围
-    if (this.dayPhase >= 0.5){
-      ctx.fillStyle = "rgba(20,30,70,0.18)";
+    // 白天/夜晚氛围（时刻表后移，对应夜色起点也后移）
+    if (this.dayPhase >= 0.93){
+      ctx.fillStyle = "rgba(20,30,70,0.28)";
+      ctx.fillRect(0,0,this.W,this.H);
+    } else if (this.dayPhase >= 0.82){
+      ctx.fillStyle = "rgba(20,30,70,0.16)";
       ctx.fillRect(0,0,this.W,this.H);
     }
 
@@ -692,7 +700,7 @@ class Simulation {
       }
     }
 
-    // 顶部 phase 条
+    // 顶部 phase 条（时间整体后移：0 早晨 · 0.22 出门 · 0.75 回家 · 0.97 上床 · 1.0 次日）
     const barY = 22;
     ctx.fillStyle = "#333";
     ctx.fillRect(20, barY, this.W-40, 6);
@@ -702,8 +710,9 @@ class Simulation {
     ctx.fillStyle = "#fff";
     ctx.font = "11px sans-serif";
     ctx.fillText("早晨", 16, barY-2);
-    ctx.fillText("傍晚", 20+dayHalf*0.5-12, barY-2);
-    ctx.fillText("午夜", 20+dayHalf*0.75-12, barY-2);
+    ctx.fillText("出门", 20+dayHalf*0.22-12, barY-2);
+    ctx.fillText("回家", 20+dayHalf*0.75-12, barY-2);
+    ctx.fillText("上床", 20+dayHalf*0.97-12, barY-2);
     ctx.fillText("次日", 20+dayHalf-18, barY-2);
   }
 
