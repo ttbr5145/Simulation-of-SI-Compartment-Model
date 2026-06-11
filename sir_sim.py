@@ -142,6 +142,10 @@ class Individual:
         # 移动速度（像素/秒） —— 提速
         self.speed = random.uniform(140, 280)
 
+        # 抖动：围绕直线方向叠加的随机扰动速度（像素/秒）
+        self.jitter_vx = 0.0
+        self.jitter_vy = 0.0
+
         # 外出时的游走参数
         self.wander_ttl = random.uniform(1.0, 2.5)
 
@@ -179,44 +183,48 @@ class Individual:
         act = self.current_activity(phase)
 
         # —— 当阶段变化时，清除旧目标 ——
-        if act != getattr(self, "_prev_act", -1):
+        if act != getattr(self._prev_act, -1):
             self.target = None
             self._prev_act = act
 
-        if act == ACT_ASLEEP:
-            # 已经在床上，小幅抖动即可（不再瞬移）
-            target = (self.bed_x, self.bed_y)
-            dist = math.hypot(self.x - target[0], self.y - target[1])
-            if dist > 2.0:
-                self._move_toward_pt(target, dt, self.speed * 0.3)
-            self._clamp_to_dorm()
-            return
+        target = None      # (x, y)
+        speed = self.speed # 基本速度
+        jitter_amp = 40    # 抖动幅度（像素/秒）
+        clamp_dorm = False # 是否限制到宿舍边界
 
-        if act == ACT_WAKING:
-            # 起床但还没出门：在寝室内小幅活动，然后等出门时间
+        if act == ACT_ASLEEP:
+            # 卧床：慢速靠近床位，几乎无抖动
+            target = (self.bed_x, self.bed_y)
+            speed = self.speed * 0.25
+            jitter_amp = 15
+            clamp_dorm = True
+
+        elif act == ACT_WAKING:
+            # 起床：在寝室内随机晃荡
             if self.target is None or self._dist_to_target() < 4:
                 self.target = self.dorm.random_inside(margin=12)
-            self._move_toward(dt, self.speed * 0.7)
-            self._clamp_to_dorm()
-            return
+            target = self.target
+            speed = self.speed * 0.7
+            jitter_amp = 50
+            clamp_dorm = True
 
-        if act == ACT_OUTGOING:
-            # 出门路上：朝广场/室外走（没到达就持续走）
+        elif act == ACT_OUTGOING:
+            # 出门路上：朝广场走
             if self.target is None or self._dist_to_target() < 10:
                 self.target = plaza.random_inside(margin=50)
-            self._move_toward(dt, self.speed)
-            self._clamp_world()
-            return
+            target = self.target
+            speed = self.speed
+            jitter_amp = 80
 
-        if act == ACT_OUTSIDE:
-            # 在外面（包含广场 & 走廊区域）游荡
+        elif act == ACT_OUTSIDE:
+            # 白天在外：目标驱动 + 随机游荡
             if not self._is_outside(plaza):
-                # 还没进入户外 —— 朝门口走
                 if self.target is None or self._dist_to_target() < 10:
                     self.target = plaza.random_inside(margin=50)
-                self._move_toward(dt, self.speed)
+                target = self.target
+                speed = self.speed
+                jitter_amp = 100
             else:
-                # 已经在外面 → 随机游荡
                 self.wander_ttl -= dt
                 if self.wander_ttl <= 0 or self.target is None:
                     if random.random() < 0.7:
@@ -226,45 +234,60 @@ class Individual:
                         ty = random.uniform(30, self.world_h - 30)
                         self.target = (tx, ty)
                     self.wander_ttl = random.uniform(1.5, 3.5)
-                self._move_toward(dt, self.speed)
-            self._clamp_world()
-            return
+                target = self.target
+                speed = self.speed
+                jitter_amp = 130
 
-        if act == ACT_RETURNING:
-            # 晚归阶段一：刚离开广场，朝床位持续移动（动态加速，不瞬移）
+        elif act == ACT_RETURNING or act == ACT_EVENING:
+            # 晚归全程：按"距离 / 剩余时间"动态加速，保证上床前物理到达
             target = (self.bed_x, self.bed_y)
             dist = math.hypot(self.x - target[0], self.y - target[1])
             remaining_phase = max(0.002, self.to_bed - phase)
             remaining_sec = remaining_phase * day_len
-            # 所需速度 = 距离 / 剩余时间；1.25 倍安全系数
-            needed_speed = (dist / remaining_sec) * 1.25
-            speed = max(self.speed, needed_speed)
-            speed = min(speed, self.speed * 5.0)   # 上限，避免瞬移感
-            self._move_toward_pt(target, dt, speed)
-            self._clamp_world()   # 只限制 world 边界，不强制进宿舍
-            return
-
-        if act == ACT_EVENING:
-            # 晚归阶段二：仍朝床位继续物理移动（同样动态加速，仍不瞬移）
-            target = (self.bed_x, self.bed_y)
-            dist = math.hypot(self.x - target[0], self.y - target[1])
-            remaining_phase = max(0.002, self.to_bed - phase)
-            remaining_sec = remaining_phase * day_len
-            needed_speed = (dist / remaining_sec) * 1.25
-            speed = max(self.speed, needed_speed)
+            needed = (dist / remaining_sec) * 1.25
+            speed = max(self.speed * 0.9, needed)
             speed = min(speed, self.speed * 5.0)
-            self._move_toward_pt(target, dt, speed)
-            self._clamp_world()   # 只限制 world 边界
-            return
+            # 晚归：小抖动，不夹到宿舍边界（避免"瞬移感"）
+            jitter_amp = 60
+            clamp_dorm = False
 
-        if act == ACT_BED:
-            # 上床：小幅靠拢（仍不瞬移），卧床才夹到宿舍范围
+        elif act == ACT_BED:
+            # 上床：慢速靠拢
             target = (self.bed_x, self.bed_y)
-            dist = math.hypot(self.x - target[0], self.y - target[1])
-            if dist > 1.5:
-                self._move_toward_pt(target, dt, self.speed * 0.4)
+            speed = self.speed * 0.4
+            jitter_amp = 10
+            clamp_dorm = True
+
+        # —— 主移动：朝目标走一步 ——
+        if target is not None:
+            self._move_toward_pt(target, dt, speed)
+
+        # —— 抖动：叠加随机扰动（让直线运动有真实走动感）——
+        self._add_jitter(dt, jitter_amp)
+
+        # —— 边界限制 ——
+        if clamp_dorm:
             self._clamp_to_dorm()
+        else:
+            self._clamp_world()
+
+    # ---------- 抖动：围绕当前位置叠加随机扰动 ----------
+    def _add_jitter(self, dt, amp):
+        if amp <= 0:
             return
+        # 阻尼 + 噪声，模拟行走时的左右晃动（避免"鬼畜"高频抖）
+        self.jitter_vx *= 0.85
+        self.jitter_vy *= 0.85
+        self.jitter_vx += random.gauss(0, amp)
+        self.jitter_vy += random.gauss(0, amp)
+        # 限速
+        vmax = amp
+        v = math.hypot(self.jitter_vx, self.jitter_vy)
+        if v > vmax:
+            self.jitter_vx = self.jitter_vx / v * vmax
+            self.jitter_vy = self.jitter_vy / v * vmax
+        self.x += self.jitter_vx * dt
+        self.y += self.jitter_vy * dt
 
     # ---------- 朝指定坐标移动（不使用 self.target）----------
     def _move_toward_pt(self, target, dt, v):
@@ -325,6 +348,7 @@ class Simulation:
     def __init__(self, root):
         self.root = root
         root.title("离散传染病模型模拟器")
+        root.configure(bg="#1e1f22")
 
         # ---- 可调参数（默认值）----
         self.model_var = tk.StringVar(value="SIR")
@@ -338,13 +362,14 @@ class Simulation:
         self.infect_r_var = tk.DoubleVar(value=14)
         self.dorm_cols_var = tk.IntVar(value=3)
         self.dorm_rows_var = tk.IntVar(value=2)
-        self.day_len_var = tk.DoubleVar(value=20.0)  # 每天 20 秒，给步行留足够时间
-        self.speed_var = tk.DoubleVar(value=2.0)     # 2x 默认倍速
+        self.day_len_var = tk.DoubleVar(value=20.0)
+        self.speed_var = tk.DoubleVar(value=2.0)
         self.running_var = tk.BooleanVar(value=False)
+        self.preset_var = tk.StringVar(value="自定义")
 
-        self.world_w = 1100
-        self.world_h = 620
-        self.chart_h = 170
+        # 单一合并画布尺寸（紧凑型）
+        self.world_w = 960
+        self.world_h = 560
 
         self._build_ui()
         self._reset_simulation()
@@ -352,73 +377,119 @@ class Simulation:
 
     # ---------------- UI ----------------
     def _build_ui(self):
-        top = tk.Frame(self.root)
-        top.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
+        # 整体左/右两栏
+        root_wrap = tk.Frame(self.root, bg="#1e1f22")
+        root_wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=False, padx=6, pady=6)
 
-        # 控制面板（左侧）
-        ctrl = tk.LabelFrame(top, text="参数设置")
-        ctrl.pack(side=tk.LEFT, fill=tk.Y, padx=4)
+        # ============ 左：参数控制栏 ============
+        ctrl = tk.LabelFrame(root_wrap, text="参数设置",
+                             bg="#2b2d31", fg="#eaeaea",
+                             font=("Segoe UI", 9, "bold"),
+                             labelanchor="nw", bd=1)
+        ctrl.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6))
 
+        # 2 列表格布局：左标签、右控件
         r = 0
-        def row(widget, r, c=0, cs=1):
-            widget.grid(row=r, column=c, columnspan=cs, sticky="w", padx=4, pady=2)
-        def lbl(text, r, c=0):
-            row(tk.Label(ctrl, text=text), r, c)
+        def add_row(label, widget):
+            nonlocal r
+            tk.Label(ctrl, text=label, bg="#2b2d31", fg="#d8d8d8",
+                     font=("Segoe UI", 8)).grid(row=r, column=0,
+                                                sticky="e", padx=(8, 4), pady=2)
+            widget.grid(row=r, column=1, sticky="w", padx=(0, 6), pady=2)
+            r += 1
 
-        lbl("模型", r); row(ttk.Combobox(ctrl, textvariable=self.model_var,
-                                         values=["SI","SIS","SIR"], width=8, state="readonly"),
-                              r, 1); r+=1
-        lbl("总人数", r); row(tk.Spinbox(ctrl, from_=10, to=600, textvariable=self.pop_size_var, width=7), r, 1); r+=1
-        lbl("初始感染", r); row(tk.Spinbox(ctrl, from_=0, to=100, textvariable=self.init_i_var, width=7), r, 1); r+=1
-        lbl("β (传染率)", r); row(tk.Spinbox(ctrl, from_=0.0, to=1.0, increment=0.01, textvariable=self.beta_var, width=7), r, 1); r+=1
-        lbl("潜伏期(天)", r); row(tk.Spinbox(ctrl, from_=0, to=30, textvariable=self.incubation_var, width=7), r, 1); r+=1
-        lbl("康复期(天)", r); row(tk.Spinbox(ctrl, from_=1, to=60, textvariable=self.recovery_var, width=7), r, 1); r+=1
-        lbl("死亡率", r); row(tk.Spinbox(ctrl, from_=0.0, to=0.5, increment=0.005, textvariable=self.mortality_var, width=7), r, 1); r+=1
-        lbl("E具传染性", r); row(tk.Checkbutton(ctrl, variable=self.latent_inf_var), r, 1); r+=1
-        lbl("接触半径(px)", r); row(tk.Spinbox(ctrl, from_=4, to=50, textvariable=self.infect_r_var, width=7), r, 1); r+=1
-        lbl("寝室列/行", r)
-        sub = tk.Frame(ctrl); sub.grid(row=r, column=1, sticky="w"); r+=1
-        tk.Spinbox(sub, from_=1, to=6, textvariable=self.dorm_cols_var, width=4).pack(side=tk.LEFT)
-        tk.Label(sub, text="×").pack(side=tk.LEFT)
-        tk.Spinbox(sub, from_=1, to=5, textvariable=self.dorm_rows_var, width=4).pack(side=tk.LEFT)
+        # —— 模型选择 ——
+        add_row("模型", ttk.Combobox(ctrl, textvariable=self.model_var,
+                                     values=["SI", "SIS", "SIR"],
+                                     width=8, state="readonly"))
 
-        lbl("每天(秒)", r); row(tk.Spinbox(ctrl, from_=2.0, to=120.0, increment=1.0, textvariable=self.day_len_var, width=7), r, 1); r+=1
-        lbl("倍速", r); row(tk.Spinbox(ctrl, from_=0.25, to=10.0, increment=0.25, textvariable=self.speed_var, width=7), r, 1); r+=1
-
-        btn_row = tk.Frame(ctrl); btn_row.grid(row=r, column=0, columnspan=2, pady=6); r+=1
-        tk.Button(btn_row, text="▶ 开始 / ⏸ 暂停", width=14,
-                  command=self._toggle_run).pack(side=tk.LEFT, padx=3)
-        tk.Button(btn_row, text="⟳ 重置", width=8,
-                  command=self._reset_simulation).pack(side=tk.LEFT, padx=3)
-
-        # 疾病预设
-        pf = tk.LabelFrame(ctrl, text="疾病预设")
-        pf.grid(row=r, column=0, columnspan=2, pady=4, sticky="we")
-        self.preset_var = tk.StringVar(value="自定义")
-        preset_box = ttk.Combobox(pf, textvariable=self.preset_var,
-                                  values=["自定义","流感","新冠类","普通感冒","超级传播"],
-                                  width=12, state="readonly")
-        preset_box.pack(padx=4, pady=3)
+        # —— 疾病预设 ——
+        preset_box = ttk.Combobox(ctrl, textvariable=self.preset_var,
+                                  values=["自定义", "流感", "新冠类",
+                                          "普通感冒", "超级传播"],
+                                  width=10, state="readonly")
+        add_row("疾病预设", preset_box)
         preset_box.bind("<<ComboboxSelected>>", self._apply_preset)
 
-        # 状态行
+        # —— 人数相关 ——
+        add_row("总人数", tk.Spinbox(ctrl, from_=10, to=600,
+                                     textvariable=self.pop_size_var, width=7))
+        add_row("初始感染", tk.Spinbox(ctrl, from_=0, to=100,
+                                       textvariable=self.init_i_var, width=7))
+
+        # —— 疾病参数 ——
+        add_row("β 传染率", tk.Spinbox(ctrl, from_=0.0, to=1.0, increment=0.01,
+                                       textvariable=self.beta_var, width=7))
+        add_row("潜伏期", tk.Spinbox(ctrl, from_=0, to=30,
+                                     textvariable=self.incubation_var, width=7))
+        add_row("康复期", tk.Spinbox(ctrl, from_=1, to=60,
+                                     textvariable=self.recovery_var, width=7))
+        add_row("死亡率", tk.Spinbox(ctrl, from_=0.0, to=0.5, increment=0.005,
+                                     textvariable=self.mortality_var, width=7))
+        add_row("E具传染", tk.Checkbutton(ctrl, variable=self.latent_inf_var,
+                                          bg="#2b2d31", highlightthickness=0))
+        add_row("接触半径", tk.Spinbox(ctrl, from_=4, to=50,
+                                       textvariable=self.infect_r_var, width=7))
+
+        # —— 寝室网格 ——
+        dorm_sub = tk.Frame(ctrl, bg="#2b2d31")
+        tk.Spinbox(dorm_sub, from_=1, to=6,
+                   textvariable=self.dorm_cols_var, width=4).pack(side=tk.LEFT)
+        tk.Label(dorm_sub, text="×", bg="#2b2d31", fg="#d8d8d8").pack(side=tk.LEFT)
+        tk.Spinbox(dorm_sub, from_=1, to=5,
+                   textvariable=self.dorm_rows_var, width=4).pack(side=tk.LEFT)
+        add_row("寝室列/行", dorm_sub)
+
+        # —— 时间 ——
+        add_row("每天(秒)", tk.Spinbox(ctrl, from_=2.0, to=120.0, increment=1.0,
+                                       textvariable=self.day_len_var, width=7))
+        add_row("倍速", tk.Spinbox(ctrl, from_=0.25, to=10.0, increment=0.25,
+                                   textvariable=self.speed_var, width=7))
+
+        # —— 按钮 ——
+        btn_row = tk.Frame(ctrl, bg="#2b2d31")
+        btn_row.grid(row=r, column=0, columnspan=2, pady=(8, 4), padx=6, sticky="we")
+        tk.Button(btn_row, text="▶ 开始 / ⏸ 暂停", width=12,
+                  command=self._toggle_run,
+                  bg="#4a6fa5", fg="white", bd=0,
+                  activebackground="#5a7fb5").pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_row, text="⟳ 重置", width=6,
+                  command=self._reset_simulation,
+                  bg="#555", fg="white", bd=0,
+                  activebackground="#666").pack(side=tk.LEFT, padx=2)
+        r += 1
+
+        # 图例（放在参数栏底部）
+        legend_frame = tk.Frame(ctrl, bg="#2b2d31")
+        legend_frame.grid(row=r, column=0, columnspan=2,
+                          sticky="w", padx=8, pady=(6, 6))
+        for name, col in [("S 易感", "#4a90e2"), ("E 潜伏", "#e2c04a"),
+                          ("I 感染", "#e04040"), ("R 免疫", "#5cb85c"),
+                          ("死", "#999999")]:
+            item = tk.Frame(legend_frame, bg="#2b2d31")
+            item.pack(side=tk.LEFT, padx=3)
+            tk.Label(item, text="●", fg=col, bg="#2b2d31",
+                     font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+            tk.Label(item, text=name, fg="#c8c8c8", bg="#2b2d31",
+                     font=("Segoe UI", 8)).pack(side=tk.LEFT)
+
+        # ============ 右：状态行 + 单一合并画布 ============
+        right = tk.Frame(root_wrap, bg="#1e1f22")
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 顶部状态条（紧凑）
         self.status_var = tk.StringVar(value="准备中")
-        tk.Label(top, textvariable=self.status_var,
+        tk.Label(right, textvariable=self.status_var,
                  anchor="w", justify="left",
-                 font=("Consolas", 10), fg="#ddd",
-                 bg="#333").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+                 font=("Consolas", 9), fg="#e0e0e0",
+                 bg="#2b2d31", bd=1, relief="solid",
+                 padx=8, pady=3).pack(side=tk.TOP, fill=tk.X, pady=(0, 4))
 
-        # 画布
-        cv_frame = tk.Frame(self.root)
-        cv_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=4)
-
-        self.world_canvas = tk.Canvas(cv_frame, width=self.world_w, height=self.world_h,
-                                      bg="#12131a", highlightthickness=1, highlightbackground="#555")
-        self.world_canvas.pack(side=tk.TOP, fill=tk.X)
-
-        self.chart_canvas = tk.Canvas(cv_frame, width=self.world_w, height=self.chart_h,
-                                      bg="#12131a", highlightthickness=1, highlightbackground="#555")
-        self.chart_canvas.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+        # 单一合并画布：顶部地图 + 底部曲线
+        self.canvas = tk.Canvas(right, width=self.world_w, height=self.world_h,
+                                bg="#12131a", highlightthickness=1,
+                                highlightbackground="#444")
+        self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
     def _apply_preset(self, *_):
         d = Disease.presets(self.preset_var.get())
@@ -431,8 +502,9 @@ class Simulation:
     # ---------------- 重置 ----------------
     def _reset_simulation(self):
         self.day = 0
-        self.phase = 0.0  # 0..1 一天内阶段
-        self.history = {"day": [], "S": [], "E": [], "I": [], "R": [], "Dead": []}
+        self.phase = 0.0
+        self.history = {"day": [], "S": [], "E": [],
+                        "I": [], "R": [], "Dead": []}
 
         # 疾病
         self.disease = Disease(
@@ -443,19 +515,21 @@ class Simulation:
             latent_infectious=self.latent_inf_var.get(),
         )
 
-        # 场景布局：左区放寝室（网格），右区放广场
+        # 场景布局：左区寝室 + 右区广场（画布高度降低）
         left_w = int(self.world_w * 0.55)
         plaza_x = left_w + 25
         plaza_w = self.world_w - plaza_x - 10
-        self.plaza = Plaza(plaza_x, 30, plaza_w, self.world_h - 40)
+        # 地图区域高度：画布底部留 110 像素给曲线
+        self.map_h = self.world_h - 110
+        self.plaza = Plaza(plaza_x, 20, plaza_w, self.map_h - 20)
 
         self.dormitories = []
         cols = max(1, self.dorm_cols_var.get())
         rows = max(1, self.dorm_rows_var.get())
-        pad_x, pad_y = 30, 40
-        gap_x, gap_y = 14, 14
+        pad_x, pad_y = 24, 24
+        gap_x, gap_y = 12, 12
         dw = (left_w - pad_x * 2 - gap_x * (cols - 1)) / cols
-        dh = (self.world_h - pad_y * 2 - gap_y * (rows - 1)) / rows
+        dh = (self.map_h - pad_y * 2 - gap_y * (rows - 1)) / rows
         idx = 1
         for r in range(rows):
             for c in range(cols):
@@ -469,7 +543,7 @@ class Simulation:
         self.people = []
         for i in range(n):
             d = self.dormitories[i % len(self.dormitories)]
-            p = Individual(d, self.world_w, self.world_h, self.disease)
+            p = Individual(d, self.world_w, self.map_h, self.disease)
             d.occupants.append(p)
             self.people.append(p)
 
@@ -481,19 +555,17 @@ class Simulation:
             if self.model_var.get() != "SI":
                 p.infection_left = max(1, self._geo(1.0 / max(1, self.disease.recovery)))
             else:
-                p.infection_left = 0  # SI 不使用
+                p.infection_left = 0
 
-        # 接触判定节奏：每天 N 次
+        # 接触判定节奏
         self.contacts_per_day = 10
         self.next_contact_phase = 1.0 / self.contacts_per_day
 
         self._push_history()
-        self._draw_world()
-        self._draw_chart()
+        self._redraw()
         self._update_status()
 
     def _geo(self, p):
-        # 几何分布（从 1 开始），均值 1/p
         k = 0
         while random.random() >= p:
             k += 1
@@ -505,33 +577,26 @@ class Simulation:
 
     def _tick(self):
         if self.running_var.get():
-            # 时间推进：day_len 秒 = 一"天"；乘倍速
-            real_dt = 0.016  # 约 60fps
+            real_dt = 0.016
             dt_phases = (real_dt / max(0.1, self.day_len_var.get())) * self.speed_var.get()
             self._advance(dt_phases)
-        # 刷新画布
-        self._draw_world()
-        self._draw_chart()
+        self._redraw()
         self._update_status()
         self.root.after(16, self._tick)
 
     def _advance(self, dphase):
         self.phase += dphase
-
-        # 每人移动（以秒为单位的 dt：phase*day_len/speed）
         dt_sec = dphase * self.day_len_var.get() / max(0.01, self.speed_var.get())
         day_len = max(0.1, self.day_len_var.get())
         for p in self.people:
             p.step_move(dt_sec, self.phase, self.plaza, day_len)
 
-        # 离散接触判定（白天/傍晚有效阶段；时刻表后移，窗口也后移）
         cur_act_phase = (self.phase % 1.0)
         activity_phase = 0.12 < cur_act_phase < 0.92
         while self.next_contact_phase < self.phase and activity_phase:
             self._do_contacts()
             self.next_contact_phase += 1.0 / self.contacts_per_day
 
-        # 跨零点 → 每日状态更新
         if self.phase >= 1.0:
             self.phase -= 1.0
             self.next_contact_phase = 1.0 / self.contacts_per_day
@@ -541,7 +606,6 @@ class Simulation:
     def _do_contacts(self):
         r2 = self.infect_r_var.get() ** 2
         n = len(self.people)
-        # 只有活动中的人才会接触
         active = []
         for p in self.people:
             if p.is_dead:
@@ -550,7 +614,6 @@ class Simulation:
             if act == ACT_ASLEEP or act == ACT_BED:
                 continue
             active.append(p)
-        # O(m^2) 对所有活跃个体做距离判定
         m = len(active)
         beta = self.disease.beta
         for i in range(m):
@@ -581,7 +644,6 @@ class Simulation:
             if p.is_dead:
                 continue
             p.state_days += 1
-
             if p.state == "E":
                 p.incubation_left -= 1
                 if p.incubation_left <= 0:
@@ -591,15 +653,12 @@ class Simulation:
                         p.infection_left = max(
                             1, self._geo(1.0 / max(1, self.disease.recovery)))
                     else:
-                        p.infection_left = 0  # SI: 感染永不康复，不计时
-
+                        p.infection_left = 0
             elif p.state == "I":
                 if model == "SI":
-                    # SI: 永远感染，不做任何转换
                     continue
                 p.infection_left -= 1
                 if p.infection_left <= 0:
-                    # 死亡或康复
                     if random.random() < self.disease.mortality:
                         p.state = "Dead"
                         p.is_dead = True
@@ -609,9 +668,6 @@ class Simulation:
                     elif model == "SIR":
                         p.state = "R"
                         p.state_days = 0
-
-            # S / R: 不做改变（R 保持免疫；S 等待被接触）
-
         self._push_history()
 
     def _push_history(self):
@@ -637,19 +693,23 @@ class Simulation:
             for k in self.history:
                 self.history[k] = self.history[k][-800:]
 
-    # ---------------- 绘制 ----------------
+    # ---------------- 统一重绘 ----------------
+    def _redraw(self):
+        c = self.canvas
+        c.delete("all")
+        self._draw_map(c)
+        self._draw_chart(c)
+
     def _state_color(self, p):
         if p.is_dead:
             return "#666666"
         return {"S": "#4a90e2", "E": "#e2c04a",
                 "I": "#e04040", "R": "#5cb85c"}.get(p.state, "#aaa")
 
-    def _draw_world(self):
-        c = self.world_canvas
-        c.delete("all")
-
-        # 社会大框
-        c.create_rectangle(3, 3, self.world_w - 3, self.world_h - 3,
+    def _draw_map(self, c):
+        # 地图区域：y ∈ [0, self.map_h]
+        # 外框
+        c.create_rectangle(2, 2, self.world_w - 2, self.map_h,
                            outline="#ffffff", width=2)
 
         # 广场
@@ -657,7 +717,7 @@ class Simulation:
         c.create_rectangle(pl.x, pl.y, pl.x + pl.w, pl.y + pl.h,
                            outline="#7a9c80", dash=(4, 4), width=1)
         c.create_text(pl.x + 8, pl.y + 10, anchor="w",
-                      text=f"{pl.name}", fill="#a7c8b0", font=("", 10))
+                      text=pl.name, fill="#a7c8b0", font=("", 9))
 
         # 寝室
         for d in self.dormitories:
@@ -665,15 +725,15 @@ class Simulation:
                                outline="#c89060", width=1,
                                fill="#2a1f12", stipple="gray25")
             c.create_text(d.x + 6, d.y + 8, anchor="w",
-                          text=f"#{d.idx}({len(d.occupants)})",
-                          fill="#e0b080", font=("", 9))
+                          text="#%d(%d)" % (d.idx, len(d.occupants)),
+                          fill="#e0b080", font=("", 8))
 
-        # 夜色遮罩（睡觉时加深）
+        # 夜色遮罩（阶段后移）
         if self.phase < 0.10 or self.phase > 0.93:
-            c.create_rectangle(0, 0, self.world_w, self.world_h,
+            c.create_rectangle(2, 2, self.world_w - 2, self.map_h,
                                fill="#1a1a3a", stipple="gray25")
         elif self.phase > 0.82:
-            c.create_rectangle(0, 0, self.world_w, self.world_h,
+            c.create_rectangle(2, 2, self.world_w - 2, self.map_h,
                                fill="#1a1a3a", stipple="gray50")
 
         # 个体
@@ -682,11 +742,6 @@ class Simulation:
         for p in self.people:
             col = self._state_color(p)
             if p.state == "I" and not p.is_dead:
-                # 感染者画一个淡圈
-                c.create_oval(p.x - inf_r, p.y - inf_r,
-                              p.x + inf_r, p.y + inf_r,
-                              outline="#ff7070", width=0)
-                # 用一个更淡的方式提示
                 c.create_oval(p.x - inf_r, p.y - inf_r,
                               p.x + inf_r, p.y + inf_r,
                               outline="#ff7070", dash=(1, 3))
@@ -695,74 +750,70 @@ class Simulation:
                           fill=col, outline=col)
 
         # 顶部 phase 时间条
-        bar_y = 12
-        c.create_rectangle(20, bar_y, self.world_w - 20, bar_y + 8,
-                            fill="#222", outline="#555")
-        w = self.world_w - 40
-        c.create_rectangle(20, bar_y, 20 + w * self.phase, bar_y + 8,
-                            fill="#f0b040", outline="")
-        # 阶段分隔
-        for (label, ph) in [("睡", 0.0), ("起床", 0.10), ("出门", 0.22),
-                            ("回家", 0.75), ("上床", 0.97), ("次日", 1.0)]:
-            x = 20 + w * ph
-            c.create_line(x, bar_y - 2, x, bar_y + 12, fill="#888")
-            c.create_text(x, bar_y + 16, text=label, fill="#bbb",
+        bar_y = 10
+        c.create_rectangle(16, bar_y, self.world_w - 16, bar_y + 7,
+                           fill="#222", outline="#555")
+        w = self.world_w - 32
+        c.create_rectangle(16, bar_y, 16 + w * self.phase, bar_y + 7,
+                           fill="#f0b040", outline="")
+        for (label, ph) in [("睡", 0.0), ("起", 0.10), ("出", 0.22),
+                            ("归", 0.75), ("卧", 0.97), ("日", 1.0)]:
+            x = 16 + w * ph
+            c.create_line(x, bar_y - 2, x, bar_y + 9, fill="#888")
+            c.create_text(x, bar_y + 13, text=label, fill="#bbb",
                           font=("", 8))
 
-    def _draw_chart(self):
-        c = self.chart_canvas
-        c.delete("all")
-        w, h = self.world_w, self.chart_h
-        c.create_rectangle(0, 0, w, h, outline="#444")
+    # ---------- 曲线（画在画布底部，高 110px）----------
+    def _draw_chart(self, c):
+        chart_top = self.map_h + 4
+        chart_bottom = self.world_h - 4
+        h = chart_bottom - chart_top
+        w = self.world_w
+
+        # 区域背景 + 框线
+        c.create_rectangle(2, chart_top - 2, self.world_w - 2, chart_bottom,
+                           outline="#444", fill="#1a1b20")
+        c.create_text(10, chart_top + 4, anchor="w",
+                      text="疫情曲线 (S/E/I/R/死亡)",
+                      fill="#888", font=("Segoe UI", 8))
 
         n = max(1, len(self.people))
         if len(self.history["day"]) < 2:
-            # 图例
-            self._draw_legend(c, 10, 10)
             return
 
-        pad_l, pad_r, pad_t, pad_b = 32, 10, 22, 22
-        pw, ph = w - pad_l - pad_r, h - pad_t - pad_b
+        pad_l, pad_r = 30, 10
+        pad_t, pad_b = 18, 16
+        pw = w - pad_l - pad_r
+        ph = h - pad_t - pad_b
         max_day = max(1, self.history["day"][-1])
 
-        # 网格 + y 轴刻度（人数）
+        # 网格 + y 轴刻度
         for i in range(0, 5):
-            y = pad_t + ph * i / 4
+            y = chart_top + pad_t + ph * i / 4
             c.create_line(pad_l, y, w - pad_r, y, fill="#262626")
-            c.create_text(pad_l - 6, y, anchor="e",
+            c.create_text(pad_l - 4, y, anchor="e",
                           text=str(int(n * (1 - i / 4))),
-                          fill="#888", font=("", 9))
-        # x 轴刻度（天）
+                          fill="#777", font=("", 8))
         tick_step = max(1, math.ceil(max_day / 10))
         for d in range(0, max_day + 1, tick_step):
             x = pad_l + pw * (d / max_day)
-            c.create_text(x, h - 8, text="d" + str(d), fill="#888", font=("", 9))
+            c.create_text(x, chart_bottom - 4, text="d" + str(d),
+                          fill="#777", font=("", 8))
 
         def plot(arr, color):
             pts = []
             for i, v in enumerate(arr):
                 x = pad_l + pw * (self.history["day"][i] / max_day)
-                y = pad_t + ph * (1 - v / n)
+                y = chart_top + pad_t + ph * (1 - v / n)
                 pts.extend([x, y])
             if len(pts) >= 4:
-                c.create_line(*pts, fill=color, width=1.6)
+                c.create_line(*pts, fill=color, width=1.4)
 
         plot(self.history["S"], "#4a90e2")
         plot(self.history["E"], "#e2c04a")
         plot(self.history["I"], "#e04040")
         plot(self.history["R"], "#5cb85c")
         plot(self.history["Dead"], "#999999")
-
-        self._draw_legend(c, pad_l + 8, 4)
-
-    def _draw_legend(self, c, x, y):
-        items = [("S", "#4a90e2"), ("E", "#e2c04a"), ("I", "#e04040"),
-                 ("R", "#5cb85c"), ("死", "#999")]
-        for name, col in items:
-            c.create_rectangle(x, y, x + 9, y + 9, fill=col, outline=col)
-            c.create_text(x + 14, y + 5, anchor="w", text=name,
-                          fill="#ddd", font=("", 9))
-            x += 32
 
     # ---------------- 状态行 ----------------
     def _update_status(self):
@@ -780,23 +831,22 @@ class Simulation:
                 r += 1
         phase_name = self._phase_name()
         self.status_var.set(
-            f"  第 {self.day:3d} 天  |  阶段: {phase_name}  |  "
-            f"S={s:<4d}  E={e:<4d}  I={ii:<4d}  R={r:<4d}  死亡={d:<4d}  "
-            f"|  模型: {self.model_var.get()}  |  总人数: {len(self.people)}  "
-            f"|  {'▶ 运行中' if self.running_var.get() else '⏸ 暂停'}"
-        )
+            "  第 %3d 天 | 阶段: %s | S=%-4d E=%-4d I=%-4d R=%-4d 死=%-4d | 模型: %s | %s"
+            % (self.day, phase_name, s, e, ii, r, d,
+               self.model_var.get(),
+               "▶ 运行中" if self.running_var.get() else "⏸ 暂停"))
 
     def _phase_name(self):
         ph = self.phase
         if ph < 0.10:
-            return "深夜/睡眠"
+            return "深夜睡眠"
         if ph < 0.22:
             return "早晨起床"
         if ph < 0.78:
             return "白天外出"
         if ph < 0.93:
             return "晚归途中"
-        return "夜间睡眠"
+        return "卧床休息"
 
 
 # =========================================================
