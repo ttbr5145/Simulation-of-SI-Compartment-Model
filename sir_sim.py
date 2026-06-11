@@ -183,9 +183,14 @@ class Individual:
         act = self.current_activity(phase)
 
         # —— 当阶段变化时，清除旧目标 ——
-        if act != getattr(self._prev_act, -1):
+        if act != getattr(self, '_prev_act', -1):
             self.target = None
             self._prev_act = act
+
+        # 确保抖动速度字段存在（__init__ 可能被旧版本跳过）
+        if not hasattr(self, 'jitter_vx'):
+            self.jitter_vx = 0.0
+            self.jitter_vy = 0.0
 
         target = None      # (x, y)
         speed = self.speed # 基本速度
