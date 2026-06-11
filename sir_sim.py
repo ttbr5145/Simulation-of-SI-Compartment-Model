@@ -589,7 +589,9 @@ class Simulation:
 
     def _advance(self, dphase):
         self.phase += dphase
-        dt_sec = dphase * self.day_len_var.get() / max(0.01, self.speed_var.get())
+        # 运动 dt：real_dt * 倍速（同时加速相位和步行，避免被抵消）
+        real_dt = 0.016
+        dt_sec = real_dt * self.speed_var.get()
         day_len = max(0.1, self.day_len_var.get())
         for p in self.people:
             p.step_move(dt_sec, self.phase, self.plaza, day_len)
