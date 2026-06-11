@@ -122,28 +122,28 @@ class Individual:
         self.roles = ["普通人"]
 
         # —— 作息时刻表（围绕均值扰动）——
-        # phase 0.00 ~ 1.00  (OUTGOING/RETURNING 时长拉长，确保有时间走到广场再回来)
-        self.wake_up  = 0.10 + random.gauss(0, 0.015)
-        self.leave    = 0.22 + random.gauss(0, 0.025)
-        self.return_t = 0.58 + random.gauss(0, 0.030)
-        self.to_bed   = 0.78 + random.gauss(0, 0.020)
+        # phase 0.00 ~ 1.00
+        self.wake_up  = 0.05 + random.gauss(0, 0.012)   # 起得更早
+        self.leave    = 0.15 + random.gauss(0, 0.020)   # 出门更早
+        self.return_t = 0.62 + random.gauss(0, 0.030)   # 回家略晚
+        self.to_bed   = 0.88 + random.gauss(0, 0.020)   # 上床更晚
         # 约束顺序
-        self.wake_up  = min(max(self.wake_up,  0.02), 0.20)
-        self.leave    = min(max(self.leave,    self.wake_up + 0.02), 0.38)
-        self.return_t = min(max(self.return_t, 0.50), 0.75)
-        self.to_bed   = min(max(self.to_bed,   self.return_t + 0.05), 0.95)
+        self.wake_up  = min(max(self.wake_up,  0.01), 0.15)
+        self.leave    = min(max(self.leave,    self.wake_up + 0.02), 0.30)
+        self.return_t = min(max(self.return_t, 0.55), 0.80)
+        self.to_bed   = min(max(self.to_bed,   self.return_t + 0.05), 0.98)
 
-        # 每个阶段的持续时长（phase 单位） —— 确保"走路"阶段足够长
-        self.t_outgoing  = 0.12 + random.gauss(0, 0.015)   # 出门路上
-        self.t_returning = 0.12 + random.gauss(0, 0.015)   # 回家路上
+        # 每个阶段的持续时长（phase 单位）
+        self.t_outgoing  = 0.12 + random.gauss(0, 0.015)
+        self.t_returning = 0.12 + random.gauss(0, 0.015)
         self.t_outgoing  = max(0.05, self.t_outgoing)
         self.t_returning = max(0.05, self.t_returning)
 
-        # 移动速度（像素/秒） —— 再慢也不会被困在寝室
-        self.speed = random.uniform(70, 140)
+        # 移动速度（像素/秒） —— 提速
+        self.speed = random.uniform(140, 280)
 
         # 外出时的游走参数
-        self.wander_ttl = random.uniform(1.0, 3.0)
+        self.wander_ttl = random.uniform(1.0, 2.5)
 
     # ---------- 行为阶段判断 ----------
     def current_activity(self, phase):
