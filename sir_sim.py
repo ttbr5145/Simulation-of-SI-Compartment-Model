@@ -231,30 +231,34 @@ class Individual:
             return
 
         if act == ACT_RETURNING:
-            # 回家：朝床位持续移动（不瞬移）
-            target = (self.bed_x, self.bed_y)
-            self._move_toward_pt(target, dt, self.speed)
-            self._clamp_world()
-            return
-
-        if act == ACT_EVENING:
-            # 晚归：朝床位物理移动，根据"距离 / 剩余时间"动态加速，
-            # 保证在上床时刻前到达床位，不瞬移。
+            # 晚归阶段一：刚离开广场，朝床位持续移动（动态加速，不瞬移）
             target = (self.bed_x, self.bed_y)
             dist = math.hypot(self.x - target[0], self.y - target[1])
             remaining_phase = max(0.002, self.to_bed - phase)
             remaining_sec = remaining_phase * day_len
-            # 所需速度 = 距离 / 剩余时间；1.3 倍安全系数
-            needed_speed = (dist / remaining_sec) * 1.3
+            # 所需速度 = 距离 / 剩余时间；1.25 倍安全系数
+            needed_speed = (dist / remaining_sec) * 1.25
             speed = max(self.speed, needed_speed)
-            # 限速避免极端瞬移感
-            speed = min(speed, self.speed * 12.0)
+            speed = min(speed, self.speed * 5.0)   # 上限，避免瞬移感
             self._move_toward_pt(target, dt, speed)
-            self._clamp_to_dorm()
+            self._clamp_world()   # 只限制 world 边界，不强制进宿舍
+            return
+
+        if act == ACT_EVENING:
+            # 晚归阶段二：仍朝床位继续物理移动（同样动态加速，仍不瞬移）
+            target = (self.bed_x, self.bed_y)
+            dist = math.hypot(self.x - target[0], self.y - target[1])
+            remaining_phase = max(0.002, self.to_bed - phase)
+            remaining_sec = remaining_phase * day_len
+            needed_speed = (dist / remaining_sec) * 1.25
+            speed = max(self.speed, needed_speed)
+            speed = min(speed, self.speed * 5.0)
+            self._move_toward_pt(target, dt, speed)
+            self._clamp_world()   # 只限制 world 边界
             return
 
         if act == ACT_BED:
-            # 上床：仅做小幅靠拢（仍不瞬移），之后基本静止
+            # 上床：小幅靠拢（仍不瞬移），卧床才夹到宿舍范围
             target = (self.bed_x, self.bed_y)
             dist = math.hypot(self.x - target[0], self.y - target[1])
             if dist > 1.5:
