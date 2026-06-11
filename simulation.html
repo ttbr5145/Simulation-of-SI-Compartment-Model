@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>离散传染病模型模拟器 — SI / SIS / SIR</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #1e1f22; color: #eaeaea;
+    display: flex; gap: 16px;
+    min-height: 100vh;
+  }
+  #panel {
+    width: 320px; flex-shrink: 0;
+    background: #2b2d31; border-radius: 8px; padding: 14px;
+    overflow-y: auto; max-height: calc(100vh - 32px);
+  }
+  #panel h2 { margin: 0 0 10px; font-size: 16px; }
+  #panel h3 { margin: 14px 0 6px; font-size: 13px; color: #a0d0ff; border-bottom: 1px solid #3a3c41; padding-bottom: 3px;}
+  #panel label { display: block; font-size: 12px; margin: 6px 0 2px; color: #c8c8c8; }
+  #panel input[type=number], #panel select {
+    width: 100%; padding: 5px 7px; font-size: 12px;
+    background: #1e1f22; color: #eaeaea; border: 1px solid #3a3c41; border-radius: 4px;
+  }
+  #panel input[type=range] { width: 100%; }
+  #panel .row { display: flex; gap: 8px; align-items: center; }
+  #panel .row > * { flex: 1; }
+  #panel button {
+    padding: 7px 10px; font-size: 12px; cursor: pointer;
+    background: #4a6fa5; color: #fff; border: none; border-radius: 4px;
+    margin-top: 4px;
+  }
+  #panel button.secondary { background: #555; }
+  #panel button:hover { filter: brightness(1.15); }
+  #panel .val { font-size: 11px; color: #9cd3a1; margin-left: 6px; }
+  #panel .tags { font-size: 11px; color: #888; margin-top: 4px; }
+
+  #main { flex: 1; display: flex; flex-direction: column; gap: 12px; min-width: 0;}
+  #worldWrap, #chartWrap {
+    background: #2b2d31; border-radius: 8px; padding: 10px;
+  }
+  canvas { display: block; background: #12131a; border-radius: 4px; }
+  #worldCanvas { width: 100%; height: auto; }
+  #chartCanvas { width: 100%; height: 180px; }
+  #status {
+    font-size: 12px; color: #c8c8c8; padding: 6px 10px;
+    background: #2b2d31; border-radius: 8px;
+    display: flex; gap: 16px; flex-wrap: wrap;
+  }
+  .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+  .sw-s { background: #4a90e2; } .sw-e { background: #e2c04a; }
+  .sw-i { background: #d94a4a; } .sw-r { background: #5cb85c; } .sw-dead { background: #666; }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <h2>离散传染病模型模拟器</h2>
+
+  <h3>模型选择</h3>
+  <label>模型</label>
+  <select id="modelSelect">
+    <option value="SI">SI （无康复）</option>
+    <option value="SIS">SIS （康复后仍易感）</option>
+    <option value="SIR" selected>SIR （康复后免疫）</option>
+  </select>
+
+  <h3>疾病预设</h3>
+  <label>选择疾病</label>
+  <select id="diseasePreset">
+    <option value="custom">自定义</option>
+    <option value="flu" selected>流感（高β，短康复）</option>
+    <option value="covid">新冠类（中β，中康复）</option>
+    <option value="common">普通感冒（低β）</option>
+    <option value="super">超级传播（高β，传染强）</option>
+  </select>
+  <label>接触传染率 β <span class="val" id="vBeta">0.15</span></label>
+  <input type="range" id="beta" min="0" max="1" step="0.01" value="0.15">
+  <label>平均潜伏期（天）<span class="val" id="vInc">0</span></label>
+  <input type="range" id="incubation" min="0" max="14" step="1" value="0">
+  <label>平均康复期（天）<span class="val" id="vRec">5</span></label>
+  <input type="range" id="recovery" min="1" max="30" step="1" value="5">
+  <label>子代传播率 <span class="val" id="vVert">0</span></label>
+  <input type="range" id="vertical" min="0" max="1" step="0.01" value="0">
+  <label>死亡率 <span class="val" id="vMort">0</span></label>
+  <input type="range" id="mortality" min="0" max="0.5" step="0.005" value="0">
+  <label>潜伏者是否具传染性</label>
+  <select id="latentInfectious"><option value="0" selected>否</option><option value="1">是</option></select>
+
+  <h3>人口设置</h3>
+  <div class="row">
+    <div>
+      <label>总人数</label>
+      <input type="number" id="popSize" value="120" min="10" max="500">
+    </div>
+    <div>
+      <label>初始感染者</label>
+      <input type="number" id="initI" value="3" min="0" max="100">
+    </div>
+  </div>
+  <label>传染判定半径（像素）<span class="val" id="vRad">14</span></label>
+  <input type="range" id="infectRadius" min="4" max="40" step="1" value="14">
+
+  <h3>场景</h3>
+  <div class="row">
+    <div>
+      <label>寝室列数</label>
+      <input type="number" id="dormCols" value="3" min="1" max="6">
+    </div>
+    <div>
+      <label>寝室行数</label>
+      <input type="number" id="dormRows" value="2" min="1" max="4">
+    </div>
+  </div>
+
+  <h3>时间</h3>
+  <label>每天时长（秒）<span class="val" id="vDay">4</span></label>
+  <input type="range" id="dayLen" min="1" max="20" step="0.5" value="4">
+  <label>倍速 <span class="val" id="vSpeed">1</span></label>
+  <input type="range" id="speed" min="0.5" max="5" step="0.5" value="1">
+
+  <h3>控制</h3>
+  <div class="row">
+    <button id="btnStart">开始 / 暂停</button>
+    <button id="btnReset" class="secondary">重置</button>
+  </div>
+  <div class="tags">颜色：S=蓝 易感 · E=黄 潜伏 · I=红 感染 · R=绿 康复 · 灰=死亡</div>
+  <div class="tags" style="color:#888;">每个个体预留字段：age(年龄), sex(性别), roles(标签列表)，便于扩展医护/免疫/流浪者等。</div>
+</div>
+
+<div id="main">
+  <div id="status">
+    <span>第 <b id="sDay">0</b> 天 · <b id="sPhase">—</b></span>
+    <span><span class="legend-dot sw-s"></span>S: <b id="sS">0</b></span>
+    <span><span class="legend-dot sw-e"></span>E: <b id="sE">0</b></span>
+    <span><span class="legend-dot sw-i"></span>I: <b id="sI">0</b></span>
+    <span><span class="legend-dot sw-r"></span>R: <b id="sR">0</b></span>
+    <span>死亡: <b id="sDead">0</b></span>
+  </div>
+  <div id="worldWrap">
+    <canvas id="worldCanvas" width="900" height="560"></canvas>
+  </div>
+  <div id="chartWrap">
+    <canvas id="chartCanvas" width="900" height="180"></canvas>
+  </div>
+</div>
+
+<script>
+/* ===========================================================
+   离散传染病模型模拟器 — SI / SIS / SIR
+   模块：Disease · SceneElement（Dormitory·Plaza·Hospital…）
+        · Individual · Simulation
+   =========================================================== */
+
+/* ---------------- Disease ---------------- */
+class Disease {
+  constructor(opts = {}) {
+    this.name         = opts.name         || "自定义";
+    this.beta         = opts.beta         ?? 0.15;   // 每次接触传染概率
+    this.incubation   = opts.incubation   ?? 0;      // 平均潜伏期（天），0=当天晚上就转I
+    this.recovery     = opts.recovery     ?? 5;      // 平均康复期（天）
+    this.verticalTrans = opts.verticalTrans ?? 0;    // 子代传播率（未来繁殖功能用）
+    this.mortality    = opts.mortality    ?? 0;      // 死亡率（康复时按概率死亡）
+    this.latentInfectious = opts.latentInfectious ?? false;
+  }
+  // 预设
+  static presets = {
+    flu:    new Disease({ name:"流感",   beta:0.22, incubation:1, recovery:4, mortality:0.002, latentInfectious:false }),
+    covid:  new Disease({ name:"新冠类", beta:0.15, incubation:2, recovery:7, mortality:0.01,  latentInfectious:false }),
+    common: new Disease({ name:"普通感冒", beta:0.08, incubation:0, recovery:3, mortality:0,    latentInfectious:false }),
+    super:  new Disease({ name:"超级传播", beta:0.35, incubation:1, recovery:6, mortality:0.005, latentInfectious:true  }),
+  };
+}
+
+/* ---------------- SceneElement ---------------- */
+// 场景基类：任意矩形区域，未来可以派生出医院、隔离区、墓地、食堂、酒店等
+class SceneElement {
+  constructor(x, y, w, h, name) {
+    this.x=x; this.y=y; this.w=w; this.h=h; this.name=name;
+    this.openDay = true;   // 白天是否可进入/穿行
+    this.openNight = false;// 夜晚是否可进入
+  }
+  contains(px, py, pad=0){
+    return px>=this.x-pad && px<=this.x+this.w+pad && py>=this.y-pad && py<=this.y+this.h+pad;
+  }
+  draw(ctx){
+    ctx.strokeStyle = "#555"; ctx.lineWidth = 1;
+    ctx.strokeRect(this.x, this.y, this.w, this.h);
+    ctx.fillStyle = "#888"; ctx.font = "11px sans-serif";
+    ctx.fillText(this.name, this.x+4, this.y+13);
+  }
+}
+class Dormitory extends SceneElement {
+  constructor(x,y,w,h,id){ super(x,y,w,h,"寝室#"+id); this.id=id; this.occupants=[]; }
+  draw(ctx){
+    ctx.fillStyle = "rgba(120,80,40,0.18)";
+    ctx.fillRect(this.x,this.y,this.w,this.h);
+    ctx.strokeStyle = "#b08050"; ctx.lineWidth = 1.2;
+    ctx.strokeRect(this.x,this.y,this.w,this.h);
+    ctx.fillStyle = "#c89060"; ctx.font = "11px sans-serif";
+    ctx.fillText(this.name + "("+this.occupants.length+")", this.x+4, this.y+13);
+  }
+}
+class Plaza extends SceneElement {
+  constructor(x,y,w,h){ super(x,y,w,h,"广场"); this.openNight=true; }
+  draw(ctx){
+    ctx.fillStyle = "rgba(80,140,90,0.12)";
+    ctx.fillRect(this.x,this.y,this.w,this.h);
+    ctx.strokeStyle = "#557a60"; ctx.setLineDash([4,4]);
+    ctx.strokeRect(this.x,this.y,this.w,this.h);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#7aa88a"; ctx.font = "12px sans-serif";
+    ctx.fillText("广场 Plaza", this.x+6, this.y+15);
+  }
+}
+// 将来可以直接在这里增加：Hospital, IsolationZone, Cemetery, Canteen, Hotel...
+
+/* ---------------- Individual ---------------- */
+// 状态：S / E / I / R / Dead
+// 预留字段：age, sex, roles[]（医护/免疫/流浪者/不自洁者...）
+let __uid = 0;
+class Individual {
+  constructor(x, y, opts={}) {
+    this.id = ++__uid;
+    this.x = x; this.y = y;
+    this.vx = (Math.random()-0.5)*2;
+    this.vy = (Math.random()-0.5)*2;
+    this.state = "S";
+    this.stateDay = 0;       // 当前状态已持续的天数
+    this.incubationLeft = 0; // 剩余潜伏天数
+    this.infectionLeft = 0;  // 剩余感染天数
+    this.dormitory = null;   // 归属寝室（未来流浪者可为null）
+    this.homePos = {x, y};   // 寝室中的床位位置
+    this.age  = opts.age  ?? (18 + Math.floor(Math.random()*30));
+    this.sex  = opts.sex  ?? (Math.random()<0.5 ? "M":"F");
+    this.roles= opts.roles ?? ["普通人"]; // 标签列表，便于扩展
+    this.isDead = false;
+  }
+  isInfectious(disease){
+    if (this.isDead) return false;
+    if (this.state === "I") return true;
+    if (this.state === "E" && disease.latentInfectious) return true;
+    return false;
+  }
+}
+
+/* ---------------- Simulation ---------------- */
+class Simulation {
+  constructor(){
+    this.worldCanvas = document.getElementById("worldCanvas");
+    this.ctx  = this.worldCanvas.getContext("2d");
+    this.chartCanvas = document.getElementById("chartCanvas");
+    this.cctx = this.chartCanvas.getContext("2d");
+
+    this.W = this.worldCanvas.width;
+    this.H = this.worldCanvas.height;
+
+    this.running = false;
+    this.reset();
+    this.bindUI();
+    this.lastTS = performance.now();
+    requestAnimationFrame((t)=>this.loop(t));
+  }
+
+  reset(){
+    // 读取参数
+    this.model      = document.getElementById("modelSelect").value;
+    this.popSize    = parseInt(document.getElementById("popSize").value)||120;
+    this.initI      = parseInt(document.getElementById("initI").value)||0;
+    this.infectRadius = parseFloat(document.getElementById("infectRadius").value);
+    this.dayLen     = parseFloat(document.getElementById("dayLen").value);
+    this.speed      = parseFloat(document.getElementById("speed").value);
+    this.dormCols   = Math.max(1, parseInt(document.getElementById("dormCols").value)||3);
+    this.dormRows   = Math.max(1, parseInt(document.getElementById("dormRows").value)||2);
+
+    // 疾病（从UI读取）
+    this.disease = new Disease({
+      name: "自定义",
+      beta: parseFloat(document.getElementById("beta").value),
+      incubation: parseFloat(document.getElementById("incubation").value),
+      recovery: parseFloat(document.getElementById("recovery").value),
+      verticalTrans: parseFloat(document.getElementById("vertical").value),
+      mortality: parseFloat(document.getElementById("mortality").value),
+      latentInfectious: parseInt(document.getElementById("latentInfectious").value)===1,
+    });
+
+    // 场景
+    this.buildScenes();
+
+    // 个体
+    this.individuals = [];
+    for (let i=0;i<this.popSize;i++){
+      // 在世界随机位置
+      const x = 10 + Math.random()*(this.W-20);
+      const y = 10 + Math.random()*(this.H-20);
+      const ind = new Individual(x, y);
+      // 分配寝室：循环分配到各寝室
+      const d = this.dormitories[i % this.dormitories.length];
+      ind.dormitory = d;
+      d.occupants.push(ind);
+      // 床位：寝室内随机一点
+      ind.homePos = {
+        x: d.x + 12 + Math.random()*(d.w-24),
+        y: d.y + 14 + Math.random()*(d.h-28),
+      };
+      this.individuals.push(ind);
+    }
+    // 初始感染者
+    for (let i=0;i<Math.min(this.initI, this.individuals.length);i++){
+      this.individuals[i].state = "I";
+      this.individuals[i].infectionLeft = this.disease.recovery;
+    }
+
+    // 时间
+    this.day = 0;
+    this.dayPhase = 0; // 0~1，0.5=傍晚/午夜分界
+    // 每日接触判定次数（让 beta 含义为"每次接触机会的传染概率"）
+    this.contactsPerDay = 8;
+    this.nextContactCheck = 1 / this.contactsPerDay; // 下一次判定的 phase 值
+    this.checkedPairs = new Set(); // 已在本阶段判定过的配对
+
+    // 曲线历史
+    this.history = { day:[], S:[], E:[], I:[], R:[], Dead:[] };
+    this.pushHistory();
+
+    this.updateStatusBar();
+    this.drawWorld();
+    this.drawChart();
+  }
+
+  buildScenes(){
+    // 布局：左侧约 55% 面积划分寝室，右侧 40% 为广场，之间留通道
+    this.dormitories = [];
+    this.plaza = null;
+    this.hospital = null;
+
+    const leftW = Math.floor(this.W * 0.58);
+    const plazaX = leftW + 20;
+    const plazaW = this.W - plazaX - 10;
+
+    // 寝室网格
+    const cols = this.dormCols, rows = this.dormRows;
+    const padX = 30, padY = 40;
+    const gapX = 12, gapY = 14;
+    const dw = (leftW - padX*2 - gapX*(cols-1)) / cols;
+    const dh = (this.H - padY*2 - gapY*(rows-1)) / rows;
+
+    for (let r=0;r<rows;r++){
+      for (let c=0;c<cols;c++){
+        const x = padX + c*(dw+gapX);
+        const y = padY + r*(dh+gapY);
+        const d = new Dormitory(x, y, dw, dh, r*cols+c+1);
+        this.dormitories.push(d);
+      }
+    }
+
+    // 广场
+    this.plaza = new Plaza(plazaX, padY, plazaW, this.H - padY*2);
+
+    // 将来在此处 push 医院 / 隔离区 / 墓地 ...
+  }
+
+  bindUI(){
+    // 参数实时显示
+    const bindVal = (id, label, parseF) => {
+      const el = document.getElementById(id);
+      const lb = document.getElementById(label);
+      const upd = ()=>{ lb.textContent = parseF(el.value); };
+      el.addEventListener("input", upd); upd();
+    };
+    bindVal("beta","vBeta", v=>parseFloat(v).toFixed(2));
+    bindVal("incubation","vInc", v=>v);
+    bindVal("recovery","vRec", v=>v);
+    bindVal("vertical","vVert", v=>parseFloat(v).toFixed(2));
+    bindVal("mortality","vMort", v=>parseFloat(v).toFixed(3));
+    bindVal("infectRadius","vRad", v=>v);
+    bindVal("dayLen","vDay", v=>parseFloat(v).toFixed(1));
+    bindVal("speed","vSpeed", v=>parseFloat(v).toFixed(1));
+
+    // 疾病预设联动
+    document.getElementById("diseasePreset").addEventListener("change", (e)=>{
+      const key = e.target.value;
+      if (key === "custom") return;
+      const p = Disease.presets[key];
+      document.getElementById("beta").value = p.beta;
+      document.getElementById("incubation").value = p.incubation;
+      document.getElementById("recovery").value = p.recovery;
+      document.getElementById("vertical").value = p.verticalTrans;
+      document.getElementById("mortality").value = p.mortality;
+      document.getElementById("latentInfectious").value = p.latentInfectious ? "1":"0";
+      // 触发 input 事件以更新 val 显示
+      ["beta","incubation","recovery","vertical","mortality"].forEach(id=>{
+        document.getElementById(id).dispatchEvent(new Event("input"));
+      });
+    });
+
+    document.getElementById("btnStart").addEventListener("click", ()=>{
+      this.running = !this.running;
+      document.getElementById("btnStart").textContent = this.running ? "暂停" : "开始 / 暂停";
+      this.lastTS = performance.now();
+    });
+    document.getElementById("btnReset").addEventListener("click", ()=>{
+      this.running = false;
+      document.getElementById("btnStart").textContent = "开始 / 暂停";
+      this.reset();
+    });
+  }
+
+  /* ---------- 主循环 ---------- */
+  loop(ts){
+    const dt = Math.min(0.05, (ts - this.lastTS)/1000) * this.speed;
+    this.lastTS = ts;
+    if (this.running) this.step(dt);
+    this.drawWorld();
+    this.drawChart();
+    requestAnimationFrame((t)=>this.loop(t));
+  }
+
+  /* dt 单位："秒"。每天长度 = this.dayLen 秒
+     dayPhase：0.0 早晨 · 0.5 傍晚（归寝开始）· 0.75 午夜（状态更新）· 1.0 次日早晨
+     采用离散接触判定：每隔 1/contactsPerDay 的 phase 做一次 O(n^2) 距离判定，
+     每次距离足够近则以概率 beta 发生传染。同一对人在同一判定点只判定一次。 */
+  step(dt){
+    this.dayPhase += dt / this.dayLen;
+    let phaseText = "";
+    let canContact = false;
+
+    if (this.dayPhase < 0.5){
+      phaseText = "白天 (活动·接触)";
+      this.moveDay(dt);
+      canContact = true;
+    } else if (this.dayPhase < 0.75){
+      phaseText = "夜间前半 (归寝·仍可接触)";
+      this.moveNightEarly(dt);
+      canContact = true;
+    } else {
+      phaseText = "午夜 (休息)";
+      this.moveNightLate(dt);
+    }
+
+    // 离散接触判定：跨越检查点时执行一次
+    while (this.nextContactCheck < this.dayPhase){
+      if (canContact) this.contacts();
+      this.nextContactCheck += 1 / this.contactsPerDay;
+    }
+
+    // 到达"零点" -> 执行每日状态更新
+    if (this.dayPhase >= 1.0){
+      this.dayPhase -= 1.0;
+      this.nextContactCheck = 1 / this.contactsPerDay;
+      this.checkedPairs.clear();
+      this.dailyUpdate();
+    }
+
+    document.getElementById("sPhase").textContent = phaseText;
+  }
+
+  /* ---------- 运动 ---------- */
+  moveDay(dt){
+    const spd = 30; // 基础速度 px/s (未乘dt，在下面乘)
+    for (const p of this.individuals){
+      if (p.isDead) continue;
+      // 随机扰动速度
+      p.vx += (Math.random()-0.5) * 2 * 60 * dt;
+      p.vy += (Math.random()-0.5) * 2 * 60 * dt;
+      // 阻尼
+      p.vx *= 0.92; p.vy *= 0.92;
+      // 限幅
+      const maxV = 70;
+      const v = Math.hypot(p.vx,p.vy);
+      if (v>maxV){ p.vx = p.vx/v*maxV; p.vy = p.vy/v*maxV; }
+      // 移动
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      // 边界反弹
+      if (p.x<6){p.x=6; p.vx=Math.abs(p.vx);}
+      if (p.x>this.W-6){p.x=this.W-6; p.vx=-Math.abs(p.vx);}
+      if (p.y<6){p.y=6; p.vy=Math.abs(p.vy);}
+      if (p.y>this.H-6){p.y=this.H-6; p.vy=-Math.abs(p.vy);}
+    }
+  }
+  moveNightEarly(dt){
+    // 朝 homePos 移动 + 小幅抖动
+    for (const p of this.individuals){
+      if (p.isDead) continue;
+      const target = p.homePos;
+      // 如果没有归属寝室（未来流浪者），就在原地游荡
+      if (!target) { this.wander(p,dt,15); continue; }
+      const dx = target.x - p.x, dy = target.y - p.y;
+      const dist = Math.hypot(dx,dy);
+      if (dist > 2){
+        const k = 40 / Math.max(2,dist);
+        p.x += dx*k*dt; p.y += dy*k*dt;
+      } else {
+        p.x += (Math.random()-0.5)*15*dt;
+        p.y += (Math.random()-0.5)*15*dt;
+      }
+      // 限制在所属寝室内 + 小边界
+      if (p.dormitory){
+        const d = p.dormitory;
+        if (p.x<d.x+4)p.x=d.x+4; if (p.x>d.x+d.w-4)p.x=d.x+d.w-4;
+        if (p.y<d.y+4)p.y=d.y+4; if (p.y>d.y+d.h-4)p.y=d.y+d.h-4;
+      }
+    }
+  }
+  moveNightLate(dt){
+    // 基本静止，仅细微抖动
+    for (const p of this.individuals){
+      if (p.isDead) continue;
+      p.x += (Math.random()-0.5)*4*dt;
+      p.y += (Math.random()-0.5)*4*dt;
+      if (p.dormitory){
+        const d = p.dormitory;
+        if (p.x<d.x+4)p.x=d.x+4; if (p.x>d.x+d.w-4)p.x=d.x+d.w-4;
+        if (p.y<d.y+4)p.y=d.y+4; if (p.y>d.y+d.h-4)p.y=d.y+d.h-4;
+      }
+    }
+  }
+  wander(p, dt, maxV){
+    p.vx += (Math.random()-0.5)*2*60*dt;
+    p.vy += (Math.random()-0.5)*2*60*dt;
+    p.vx *= 0.9; p.vy *= 0.9;
+    const v = Math.hypot(p.vx,p.vy);
+    if (v>maxV){ p.vx = p.vx/v*maxV; p.vy=p.vy/v*maxV; }
+    p.x += p.vx*dt; p.y += p.vy*dt;
+    if (p.x<6){p.x=6;} if (p.x>this.W-6){p.x=this.W-6;}
+    if (p.y<6){p.y=6;} if (p.y>this.H-6){p.y=this.H-6;}
+  }
+
+  /* ---------- 接触传染（白天 + 前半夜会调用）---------- */
+  contacts(){
+    // 简单 O(n^2)，人数<=500 完全 OK
+    const n = this.individuals.length;
+    const r2 = this.infectRadius * this.infectRadius;
+    for (let i=0;i<n;i++){
+      const a = this.individuals[i];
+      if (a.isDead || a.state==="R") continue;
+      if (!a.isInfectious(this.disease)) continue;
+      // a 是传染源，尝试感染附近的 S/E
+      for (let j=i+1;j<n;j++){
+        const b = this.individuals[j];
+        if (b.isDead || b.state!=="S") continue;
+        const dx = a.x-b.x, dy = a.y-b.y;
+        if (dx*dx + dy*dy <= r2){
+          if (Math.random() < this.disease.beta){
+            b.state = "E";
+            b.stateDay = 0;
+            // 潜伏期：若 incubation=0，则当天晚上零点就转 I；
+            // 否则取 围绕 incubation 的几何分布
+            if (this.disease.incubation <= 0){
+              b.incubationLeft = 0;
+            } else {
+              // 最少1天
+              b.incubationLeft = Math.max(1, Math.round(
+                this.geometric(1/this.disease.incubation)
+              ));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 几何分布随机整数（期望=1/p）
+  geometric(p){
+    let k = 0;
+    while (Math.random() >= p) k++;
+    return k+1;
+  }
+
+  /* ---------- 零点：每日状态更新 ---------- */
+  dailyUpdate(){
+    this.day++;
+    for (const p of this.individuals){
+      if (p.isDead) continue;
+      if (p.state === "E"){
+        p.incubationLeft -= 1;
+        if (p.incubationLeft <= 0){
+          p.state = "I";
+          p.stateDay = 0;
+          p.infectionLeft = Math.max(1, this.geometric(1/this.disease.recovery));
+        } else {
+          p.stateDay++;
+        }
+      } else if (p.state === "I"){
+        p.infectionLeft -= 1;
+        // SI：永不康复
+        if (this.model === "SI") {
+          p.stateDay++;
+          continue;
+        }
+        if (p.infectionLeft <= 0){
+          // 死亡 or 康复
+          if (Math.random() < this.disease.mortality){
+            p.state = "Dead";
+            p.isDead = true;
+          } else if (this.model === "SIS"){
+            p.state = "S";
+            p.stateDay = 0;
+          } else if (this.model === "SIR"){
+            p.state = "R";
+            p.stateDay = 0;
+          }
+        } else {
+          p.stateDay++;
+        }
+      } else {
+        p.stateDay++;
+      }
+    }
+    this.pushHistory();
+    this.updateStatusBar();
+  }
+
+  pushHistory(){
+    let S=0,E=0,I=0,R=0,Dead=0;
+    for (const p of this.individuals){
+      if (p.isDead) Dead++;
+      else if (p.state==="S") S++;
+      else if (p.state==="E") E++;
+      else if (p.state==="I") I++;
+      else if (p.state==="R") R++;
+    }
+    this.history.day.push(this.day);
+    this.history.S.push(S); this.history.E.push(E);
+    this.history.I.push(I); this.history.R.push(R);
+    this.history.Dead.push(Dead);
+    // 限制历史长度，避免无限增长
+    if (this.history.day.length > 500){
+      ["day","S","E","I","R","Dead"].forEach(k=>this.history[k].shift());
+    }
+  }
+
+  updateStatusBar(){
+    let S=0,E=0,I=0,R=0,Dead=0;
+    for (const p of this.individuals){
+      if (p.isDead) Dead++;
+      else if (p.state==="S") S++;
+      else if (p.state==="E") E++;
+      else if (p.state==="I") I++;
+      else if (p.state==="R") R++;
+    }
+    document.getElementById("sDay").textContent = this.day;
+    document.getElementById("sS").textContent = S;
+    document.getElementById("sE").textContent = E;
+    document.getElementById("sI").textContent = I;
+    document.getElementById("sR").textContent = R;
+    document.getElementById("sDead").textContent = Dead;
+  }
+
+  /* ---------- 绘制世界 ---------- */
+  drawWorld(){
+    const ctx = this.ctx;
+    ctx.fillStyle = "#12131a";
+    ctx.fillRect(0,0,this.W,this.H);
+
+    // 社会大黑框（整体）
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(3,3,this.W-6,this.H-6);
+
+    // 场景元素
+    for (const d of this.dormitories) d.draw(ctx);
+    if (this.plaza) this.plaza.draw(ctx);
+    // 医院/隔离区等未来可在这里 draw
+
+    // 白天/夜晚氛围
+    if (this.dayPhase >= 0.5){
+      ctx.fillStyle = "rgba(20,30,70,0.18)";
+      ctx.fillRect(0,0,this.W,this.H);
+    }
+
+    // 个体
+    for (const p of this.individuals){
+      let color = "#4a90e2";
+      if (p.isDead) color = "#666";
+      else if (p.state === "E") color = "#e2c04a";
+      else if (p.state === "I") color = "#d94a4a";
+      else if (p.state === "R") color = "#5cb85c";
+
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.isDead?2.5:3.5, 0, Math.PI*2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      if (p.state === "I"){
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, this.infectRadius, 0, Math.PI*2);
+        ctx.strokeStyle = "rgba(217,74,74,0.15)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+
+    // 顶部 phase 条
+    const barY = 22;
+    ctx.fillStyle = "#333";
+    ctx.fillRect(20, barY, this.W-40, 6);
+    const dayHalf = this.W-40;
+    ctx.fillStyle = "#f0b040";
+    ctx.fillRect(20, barY, dayHalf*this.dayPhase, 6);
+    ctx.fillStyle = "#fff";
+    ctx.font = "11px sans-serif";
+    ctx.fillText("早晨", 16, barY-2);
+    ctx.fillText("傍晚", 20+dayHalf*0.5-12, barY-2);
+    ctx.fillText("午夜", 20+dayHalf*0.75-12, barY-2);
+    ctx.fillText("次日", 20+dayHalf-18, barY-2);
+  }
+
+  /* ---------- 绘制曲线 ---------- */
+  drawChart(){
+    const ctx = this.cctx;
+    const W = this.chartCanvas.width, H = this.chartCanvas.height;
+    ctx.fillStyle = "#12131a"; ctx.fillRect(0,0,W,H);
+    ctx.strokeStyle = "#333"; ctx.lineWidth = 1;
+    ctx.strokeRect(0.5,0.5,W-1,H-1);
+
+    const N = this.individuals.length;
+    if (N===0 || this.history.day.length<2) return;
+
+    const padL = 30, padR = 10, padT = 10, padB = 22;
+    const pw = W - padL - padR;
+    const ph = H - padT - padB;
+
+    const days = this.history.day.length;
+    const maxDay = Math.max(1, this.history.day[days-1]);
+
+    // 水平网格
+    ctx.strokeStyle = "#262626";
+    for (let i=0;i<=4;i++){
+      const y = padT + ph*i/4;
+      ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(W-padR,y); ctx.stroke();
+      ctx.fillStyle = "#888"; ctx.font = "10px sans-serif";
+      ctx.fillText(Math.round(N*(1-i/4)), 4, y+3);
+    }
+    // 垂直刻度（天）
+    const tickStep = Math.max(1, Math.ceil(maxDay/10));
+    for (let d=0; d<=maxDay; d+=tickStep){
+      const x = padL + pw * (d/maxDay);
+      ctx.fillStyle = "#888"; ctx.font="10px sans-serif";
+      ctx.fillText("d"+d, x-6, H-6);
+    }
+
+    const plot = (arr, color) => {
+      ctx.strokeStyle = color; ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      for (let i=0;i<arr.length;i++){
+        const x = padL + pw * (this.history.day[i]/maxDay);
+        const y = padT + ph * (1 - arr[i]/N);
+        if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    };
+    plot(this.history.S, "#4a90e2");
+    plot(this.history.E, "#e2c04a");
+    plot(this.history.I, "#d94a4a");
+    plot(this.history.R, "#5cb85c");
+    plot(this.history.Dead, "#999");
+
+    // 图例
+    ctx.font = "11px sans-serif";
+    const labels = [["S","#4a90e2"],["E","#e2c04a"],["I","#d94a4a"],["R","#5cb85c"],["死","#999"]];
+    let lx = padL + 8;
+    for (const [name,col] of labels){
+      ctx.fillStyle = col; ctx.fillRect(lx, 4, 10, 10);
+      ctx.fillStyle = "#ddd"; ctx.fillText(name, lx+13, 13);
+      lx += 30;
+    }
+  }
+}
+
+/* 启动 */
+window.addEventListener("load", ()=>{
+  window.sim = new Simulation();
+});
+</script>
+
+</body>
+</html>
