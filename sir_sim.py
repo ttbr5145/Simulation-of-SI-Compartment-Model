@@ -142,9 +142,12 @@ class Individual:
         # 移动速度（像素/秒） —— 提速
         self.speed = random.uniform(140, 280)
 
-        # 抖动：围绕直线方向叠加的随机扰动速度（像素/秒）
+        # 抖动速度（像素/秒）—— 给直线运动叠加随机扰动
         self.jitter_vx = 0.0
         self.jitter_vy = 0.0
+
+        # 阶段变化标记（清除旧目标）
+        self._prev_act = -1
 
         # 外出时的游走参数
         self.wander_ttl = random.uniform(1.0, 2.5)
@@ -186,11 +189,6 @@ class Individual:
         if act != getattr(self, '_prev_act', -1):
             self.target = None
             self._prev_act = act
-
-        # 确保抖动速度字段存在（__init__ 可能被旧版本跳过）
-        if not hasattr(self, 'jitter_vx'):
-            self.jitter_vx = 0.0
-            self.jitter_vy = 0.0
 
         target = None      # (x, y)
         speed = self.speed # 基本速度
